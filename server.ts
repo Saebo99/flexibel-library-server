@@ -15,6 +15,9 @@ require("dotenv").config();
 const app = express();
 const PORT = 3000;
 
+const SECRET_CRYPTO_KEY =
+  "623c04d4bba66a6379db4df14c3cbca794153390ddcd204186066daf894c3e52";
+
 // Initialize middleware
 app.use(express.json()); // This will allow the server to parse JSON payloads
 app.use(cors()); // Allow all origins for now (restrict in production)
@@ -125,7 +128,7 @@ app.post("/api/createAPIKey", async (req, res) => {
 
     // For encryption, create an initialization vector (IV) and use it with createCipheriv
     const iv = crypto.randomBytes(16);
-    const keyBuffer = Buffer.from(process.env.SECRET_CRYPTO_KEY || "", "hex");
+    const keyBuffer = Buffer.from(SECRET_CRYPTO_KEY || "", "hex");
     const cipher = crypto.createCipheriv("aes-256-cbc", keyBuffer, iv);
     const encrypted = Buffer.concat([
       cipher.update(apiKey, "utf8"),
@@ -182,7 +185,7 @@ app.get("/api/getAPIKeys", async (req, res) => {
       const { apiKeyEncrypted, iv, name, createdAt, lastUsedAt } = data;
 
       // Decrypt the apiKeyEncrypted field
-      const keyBuffer = Buffer.from(process.env.SECRET_CRYPTO_KEY || "", "hex");
+      const keyBuffer = Buffer.from(SECRET_CRYPTO_KEY || "", "hex");
       const ivBuffer = Buffer.from(iv, "hex");
       const decipher = crypto.createDecipheriv(
         "aes-256-cbc",
