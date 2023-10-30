@@ -1,4 +1,7 @@
 import express, { Request, Response } from "express";
+import axios from "axios";
+import * as url from "url";
+const cheerio = require("cheerio");
 import cors from "cors";
 const crypto = require("crypto");
 import OpenAI from "openai";
@@ -25,6 +28,92 @@ app.use(cors()); // Allow all origins for now (restrict in production)
 const openai = new OpenAI({
   apiKey: "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",
 });
+
+async function crawlAndProcess(
+  initialUrl: string,
+  depth: number,
+  projectId: string,
+  maxPages = 400
+) {
+  const paginationURLsToVisit: [string, number][] = [[initialUrl, depth]]; // URL with its associated depth
+  const visitedURLs: string[] = [];
+
+  while (paginationURLsToVisit.length !== 0 && visitedURLs.length <= maxPages) {
+    const [currentURL, currentDepth] = paginationURLsToVisit.pop() || ["", 0];
+
+    // Check if this URL is already visited or depth is zero
+    if (visitedURLs.includes(currentURL) || currentDepth <= 0) continue;
+
+    // Fetch and parse the page content
+    let pageHTML;
+    try {
+      pageHTML = await axios.get(currentURL, {
+        headers: {
+          "User-Agent":
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
+        },
+      });
+    } catch (error: any) {
+      console.error(`Error fetching URL: ${currentURL}`, error.message);
+      continue; // skip this URL and proceed with the next one
+    }
+    const $ = cheerio.load(pageHTML.data);
+
+    // Get all anchor links and resolve them to absolute URLs
+    $("a").each((index: number, element: any) => {
+      const foundURL = url.resolve(currentURL, $(element).attr("href"));
+
+      // You might want to filter URLs based on some criteria
+      if (
+        !visitedURLs.includes(foundURL) &&
+        !paginationURLsToVisit.some(([url]) => url === foundURL)
+      ) {
+        paginationURLsToVisit.push([foundURL, currentDepth - 1]);
+      }
+    });
+
+    // Process this URL (Your logic to save data from this URL)
+    const loader = new CheerioWebBaseLoader(currentURL, {
+      selector: "p, span",
+    });
+    const docs = await loader.load();
+
+    const textSplitter = new RecursiveCharacterTextSplitter({
+      chunkSize: 500,
+      chunkOverlap: 0,
+    });
+    const splitDocs = await textSplitter.splitDocuments(docs);
+
+    await saveToDB(splitDocs, projectId);
+
+    // Get a reference to the dataSources subcollection in the current project document
+    const dataSourcesRef = db
+      .collection("projects")
+      .doc(projectId)
+      .collection("dataSources")
+      .doc();
+
+    // Create a new document for the current url
+    await dataSourcesRef.set({
+      source: currentURL,
+      charCount: splitDocs.reduce(
+        (sum, doc) => sum + doc.pageContent.length,
+        0
+      ),
+      type: "website",
+      isActive: true,
+      insertedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    // Mark this URL as visited
+    visitedURLs.push(currentURL);
+
+    // Delay between requests to respect rate limits and avoid being blocked
+    await new Promise((resolve) => setTimeout(resolve, 1000)); // 1 second delay
+  }
+}
+
+// Make sure to handle errors in the main function or caller function like the example provided.
 
 export async function saveToDB(documents: any[], projectId: string) {
   const client = (weaviate as any).client({
@@ -216,7 +305,7 @@ app.get("/api/getAPIKeys", async (req, res) => {
 
 app.post("/api/ingestData", async (req, res) => {
   const apiKey = req.headers.authorization?.replace("Bearer ", "");
-  const { urls } = req.body;
+  const { urls, crawlType } = req.body;
 
   if (!apiKey) {
     res.status(401).send("Unauthorized");
@@ -238,45 +327,128 @@ app.post("/api/ingestData", async (req, res) => {
   const doc = snapshot.docs[0];
   const projectId = doc.data().projectId;
 
+  console.log("urls: ", urls);
+  console.log("crawlType: ", crawlType);
   for (let url of urls) {
     try {
-      const loader = new CheerioWebBaseLoader(url, {
-        selector: "p, span",
-      });
-      const docs = await loader.load();
+      if (crawlType === "single") {
+        const loader = new CheerioWebBaseLoader(url, {
+          selector: "p, span",
+        });
+        const docs = await loader.load();
 
-      const textSplitter = new RecursiveCharacterTextSplitter({
-        chunkSize: 500,
-        chunkOverlap: 0,
-      });
-      const splitDocs = await textSplitter.splitDocuments(docs);
+        const textSplitter = new RecursiveCharacterTextSplitter({
+          chunkSize: 500,
+          chunkOverlap: 0,
+        });
+        const splitDocs = await textSplitter.splitDocuments(docs);
 
-      await saveToDB(splitDocs, projectId);
+        await saveToDB(splitDocs, projectId);
 
-      // Get a reference to the dataSources subcollection in the current project document
-      const dataSourcesRef = db
-        .collection("projects")
-        .doc(projectId)
-        .collection("dataSources")
-        .doc();
+        // Get a reference to the dataSources subcollection in the current project document
+        const dataSourcesRef = db
+          .collection("projects")
+          .doc(projectId)
+          .collection("dataSources")
+          .doc();
 
-      // Create a new document for the current url
-      await dataSourcesRef.set({
-        source: url,
-        charCount: splitDocs.reduce(
-          (sum, doc) => sum + doc.pageContent.length,
-          0
-        ),
-        type: "website",
-        isActive: true,
-        insertedAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
+        // Create a new document for the current url
+        await dataSourcesRef.set({
+          source: url,
+          charCount: splitDocs.reduce(
+            (sum, doc) => sum + doc.pageContent.length,
+            0
+          ),
+          type: "website",
+          isActive: true,
+          insertedAt: admin.firestore.FieldValue.serverTimestamp(),
+        });
+      } else if (crawlType === "crawl") {
+        await crawlAndProcess(url, 2, projectId, 100); // Here, 2 is the depth of crawling. You can adjust it as required.
+      } else {
+        res.status(400).send("Invalid crawlType provided");
+        return;
+      }
     } catch (error: any) {
       console.error("Error processing URL:", url, error.message);
     }
   }
 
   res.json({ message: "Data ingestion was successful" });
+});
+
+app.post("/api/createModel", async (req, res) => {
+  const apiKey = req.headers.authorization?.replace("Bearer ", "");
+  const { config } = req.body;
+
+  if (!apiKey) {
+    res.status(401).send("Unauthorized");
+    return;
+  }
+
+  // Validate API Key
+  const apiKeyHash = crypto.createHash("sha256").update(apiKey).digest("hex");
+  const keysCollectionRef = db.collection("keys");
+  const keysQuery = keysCollectionRef.where("apiKeyHashed", "==", apiKeyHash);
+  const snapshot = await keysQuery.get();
+
+  if (snapshot.empty) {
+    res.status(401).send("Invalid API Key");
+    return;
+  }
+
+  const modelsCollectionRef = db.collection("models");
+
+  // Use config parameter if provided, otherwise use default values
+  const newModelData = config || {
+    modelType: "gpt-3.5-turbo",
+    name: "new model",
+    prompt: "New prompt",
+    responseLength: 1500,
+    temperature: 0.5,
+    suggestedMessages: [],
+  };
+
+  try {
+    const modelRef = await modelsCollectionRef.add(newModelData);
+    const modelId = modelRef.id;
+
+    // Retrieve projectId from the document
+    const doc = snapshot.docs[0];
+    const projectId = doc.data().projectId;
+
+    // Get a reference to the dataSources subcollection in the current project document
+    const projectRef = db.collection("projects").doc(projectId);
+
+    // Get the current data of the project document
+    const projectDoc = await projectRef.get();
+    const projectData = projectDoc.data();
+
+    if (projectData) {
+      // Find the key that has a value of true and set it to false
+      const updatedModels = { ...projectData.models };
+      for (const [key, value] of Object.entries(updatedModels)) {
+        if (value === true) {
+          updatedModels[key] = false;
+          break;
+        }
+      }
+
+      // Add the new key-value pair with a value of true
+      updatedModels[modelId] = true;
+
+      // Update the models object inside the projectRef document
+      await projectRef.update({
+        models: updatedModels,
+      });
+    }
+
+    // return modelId
+    res.json({ modelId });
+  } catch (error: any) {
+    console.error("Error creating model:", error.message);
+    res.status(500).send("Server Error");
+  }
 });
 
 app.post("/api/chat", async (req: Request, res: Response) => {
@@ -300,16 +472,12 @@ app.post("/api/chat", async (req: Request, res: Response) => {
       return;
     }
 
-    // Retrieve projectId from the document
+    // Retrieve projectId and models from the document
     const doc = snapshot.docs[0];
     const projectId = doc.data().projectId;
-
+    const models = doc.data().models;
     // content of the final message in messages
     const queryParam = messages[messages.length - 1].content;
-    // All messages in messages except the final one
-    const context = messages
-      .slice(0, messages.length - 1)
-      .map((m: any) => m.content);
 
     // Ensure messages are provided
     if (!messages) {
@@ -317,31 +485,42 @@ app.post("/api/chat", async (req: Request, res: Response) => {
     }
     const relatedDocs = await queryDB(queryParam, projectId);
 
-    const prompt = `You are part of the Sparebank1 customer service team. Given the verified sources and question below, create a final answer in markdown:
+    // Find the key that has a value equal to true within the models object
+    const modelKey = Object.keys(models).find((key) => models[key] === true);
 
-      ${relatedDocs.map((doc) => doc.pageContent).join("\n\n")}
+    if (!modelKey) {
+      res.status(400).send("No valid model key found");
+      return;
+    }
 
-    Remember while answering:
-        - Be polite and friendly.
-        - Be helpful.
-        - Only talk about the answer. Do not reference the sources.
-        - You have access to previous messages in the conversation.
-        - Always answer in the same language as the question.
+    // Use the retrieved key to get the model document from the Firestore database
+    const modelDocRef = db.collection("models").doc(modelKey);
+    const modelDoc = await modelDocRef.get();
 
-    Question: ${queryParam}
+    if (!modelDoc.exists) {
+      res.status(400).send("Model not found");
+      return;
+    }
 
-      Begin!`;
+    const modelData = modelDoc.data();
+    const promptTemplate = modelData.prompt.replace(
+      "[context]",
+      `${relatedDocs.map((doc) => doc.pageContent).join("\n\n")}`
+    );
 
-    // A list of all the messages in the messages array except the last one, and the prompt at the end in this format: {role: "user", content: prompt}
     const promptMessages = [
       ...messages.slice(0, messages.length - 1),
-      { role: "user", content: prompt },
+      { role: "user", content: promptTemplate },
     ];
 
+    console.log("Prompt messages: ", promptMessages);
+
     const completion = await openai.chat.completions.create({
-      model: "gpt-3.5-turbo",
+      model: modelData.modelType,
       messages: promptMessages,
       stream: true,
+      max_tokens: modelData.responseLength,
+      temperature: modelData.temperature,
     });
 
     // Stream the response to the client
