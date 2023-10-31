@@ -327,8 +327,6 @@ app.post("/api/ingestData", async (req, res) => {
   const doc = snapshot.docs[0];
   const projectId = doc.data().projectId;
 
-  console.log("urls: ", urls);
-  console.log("crawlType: ", crawlType);
   for (let url of urls) {
     try {
       if (crawlType === "single") {
@@ -473,9 +471,20 @@ app.post("/api/chat", async (req: Request, res: Response) => {
     }
 
     // Retrieve projectId and models from the document
-    const doc = snapshot.docs[0];
-    const projectId = doc.data().projectId;
-    const models = doc.data().models;
+    const keyDoc = snapshot.docs[0];
+    const projectId = keyDoc.data().projectId;
+
+    // Fetching the document with the given projectId from the projects collection
+    const projectDocRef = db.collection("projects").doc(projectId);
+    const projectDocSnapshot = await projectDocRef.get();
+
+    if (!projectDocSnapshot.exists) {
+      console.error("Project document not found for the given projectId.");
+      // Handle the error as needed
+      return;
+    }
+
+    const models = projectDocSnapshot.data().models;
     // content of the final message in messages
     const queryParam = messages[messages.length - 1].content;
 
@@ -483,6 +492,7 @@ app.post("/api/chat", async (req: Request, res: Response) => {
     if (!messages) {
       return res.status(400).json({ error: "Messages are required" });
     }
+
     const relatedDocs = await queryDB(queryParam, projectId);
 
     // Find the key that has a value equal to true within the models object
@@ -501,23 +511,25 @@ app.post("/api/chat", async (req: Request, res: Response) => {
       res.status(400).send("Model not found");
       return;
     }
-
     const modelData = modelDoc.data();
-    const promptTemplate = modelData.prompt.replace(
-      "[context]",
-      `${relatedDocs.map((doc) => doc.pageContent).join("\n\n")}`
-    );
 
-    const promptMessages = [
-      ...messages.slice(0, messages.length - 1),
-      { role: "user", content: promptTemplate },
-    ];
+    // Extract the last 4 messages (excluding the last one)
+    const chatHistory = messages
+      .slice(-5, -1)
+      .map((msg: any) => `${msg.role}: ${msg.content}`)
+      .join("\n");
 
-    console.log("Prompt messages: ", promptMessages);
+    const promptTemplate = modelData.prompt
+      .replace(
+        "[context]",
+        `${relatedDocs.map((doc) => doc.pageContent).join("\n\n")}`
+      )
+      .replace("[chat_history]", chatHistory || "No history")
+      .replace("[question]", messages[messages.length - 1].content);
 
     const completion = await openai.chat.completions.create({
       model: modelData.modelType,
-      messages: promptMessages,
+      messages: [{ role: "user", content: promptTemplate }],
       stream: true,
       max_tokens: modelData.responseLength,
       temperature: modelData.temperature,
@@ -543,7 +555,9 @@ app.post("/api/chat", async (req: Request, res: Response) => {
   } catch (error) {
     // Only send a response if headers haven't been sent yet
     if (!res.headersSent) {
-      res.status(500).json({ error: "Error interacting with OpenAI" });
+      res
+        .status(500)
+        .json({ error: "Error interacting with OpenAI: " + error });
     }
   }
 });
