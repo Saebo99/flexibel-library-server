@@ -5,13 +5,24 @@ const cheerio = require("cheerio");
 import cors from "cors";
 const crypto = require("crypto");
 import OpenAI from "openai";
+const fs = require("fs").promises;
+const fetch = require("node-fetch");
+const FormData = require("form-data");
+const multer = require("multer");
 import { CheerioWebBaseLoader } from "langchain/document_loaders/web/cheerio";
+import { PDFLoader } from "langchain/document_loaders/fs/pdf";
+import { DocxLoader } from "langchain/document_loaders/fs/docx";
+import { TextLoader } from "langchain/document_loaders/fs/text";
+import { JSONLoader } from "langchain/document_loaders/fs/json";
 import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
 import weaviate from "weaviate-ts-client";
 import { WeaviateStore } from "langchain/vectorstores/weaviate";
 import { OpenAIEmbeddings } from "langchain/embeddings/openai";
 const admin = require("firebase-admin");
 import { db } from "./firebase/db";
+
+const storage = multer.memoryStorage();
+const upload = multer({ storage: storage });
 
 require("dotenv").config();
 
@@ -113,9 +124,30 @@ async function crawlAndProcess(
   }
 }
 
-// Make sure to handle errors in the main function or caller function like the example provided.
-
 export async function saveToDB(documents: any[], projectId: string) {
+  console.log("projectId: ", projectId);
+
+  // Filter out undesired fields in metadata
+  const sanitizedDocuments = documents.map((document) => {
+    const { metadata } = document;
+
+    // Keep only fields that start with "loc" or are "source"
+    const sanitizedMetadata: any = {};
+    for (const key in metadata) {
+      if (key.startsWith("loc") || key === "source") {
+        sanitizedMetadata[key] = metadata[key];
+      }
+    }
+
+    // Return the updated document
+    return {
+      ...document,
+      metadata: sanitizedMetadata,
+    };
+  });
+
+  console.log("sanitizedDocuments[0]: ", sanitizedDocuments[0]);
+
   const client = (weaviate as any).client({
     scheme: process.env.WEAVIATE_SCHEME || "https",
     host: "my-test-cluster-85hxrlf0.weaviate.network" || "localhost",
@@ -124,10 +156,14 @@ export async function saveToDB(documents: any[], projectId: string) {
     ),
   });
 
-  await WeaviateStore.fromDocuments(documents, new OpenAIEmbeddings(), {
-    client,
-    indexName: projectId,
-  });
+  await WeaviateStore.fromDocuments(
+    sanitizedDocuments,
+    new OpenAIEmbeddings(),
+    {
+      client,
+      indexName: projectId,
+    }
+  );
 }
 
 export async function queryDB(query: string, projectId: string) {
@@ -373,6 +409,93 @@ app.post("/api/ingestData", async (req, res) => {
     }
   }
 
+  res.json({ message: "Data ingestion was successful" });
+});
+
+app.post("/api/ingestFile", upload.single("file"), async (req, res) => {
+  const apiKey = req.headers.authorization?.replace("Bearer ", "");
+  const {} = req.body;
+
+  if (!apiKey) {
+    res.status(401).send("Unauthorized");
+    return;
+  }
+
+  // Validate API Key
+  const apiKeyHash = crypto.createHash("sha256").update(apiKey).digest("hex");
+  const keysCollectionRef = db.collection("keys");
+  const keysQuery = keysCollectionRef.where("apiKeyHashed", "==", apiKeyHash);
+  const snapshot = await keysQuery.get();
+
+  if (snapshot.empty) {
+    res.status(401).send("Invalid API Key");
+    return;
+  }
+
+  // Retrieve projectId from the document
+  const doc = snapshot.docs[0];
+  const projectId = doc.data().projectId;
+
+  if (!(req as any).file) {
+    return res.status(400).send("No file uploaded");
+  }
+
+  // Generate a path for a new temporary file
+  const tmpFilePath = `/tmp/${(req as any).file.originalname}`;
+
+  // Write the uploaded file data to the temporary file
+  await fs.writeFile(tmpFilePath, (req as any).file.buffer);
+  console.log("Saved uploaded file to:", tmpFilePath);
+
+  // Determine the file extension to decide which loader to use
+  const fileExtension = (req as any).file.originalname
+    .split(".")
+    .pop()
+    ?.toLowerCase();
+
+  let loader;
+  switch (fileExtension) {
+    case "pdf":
+      loader = new PDFLoader(tmpFilePath);
+      break;
+    case "docx":
+      loader = new DocxLoader(tmpFilePath);
+      break;
+    case "txt":
+      loader = new TextLoader(tmpFilePath);
+      break;
+    case "json":
+      loader = new JSONLoader(tmpFilePath);
+      break;
+    default:
+      return res.status(400).send("Unsupported file type");
+  }
+
+  const docs = await loader.load();
+
+  const textSplitter = new RecursiveCharacterTextSplitter({
+    chunkSize: 500,
+    chunkOverlap: 0,
+  });
+  const splitDocs = await textSplitter.splitDocuments(docs);
+
+  await saveToDB(splitDocs, projectId);
+
+  // Get a reference to the dataSources subcollection in the current project document
+  const dataSourcesRef = db
+    .collection("projects")
+    .doc(projectId)
+    .collection("dataSources")
+    .doc();
+
+  // Create a new document for the current url
+  await dataSourcesRef.set({
+    source: (req as any).file.originalname,
+    charCount: splitDocs.reduce((sum, doc) => sum + doc.pageContent.length, 0),
+    type: "file",
+    isActive: true,
+    insertedAt: admin.firestore.FieldValue.serverTimestamp(),
+  });
   res.json({ message: "Data ingestion was successful" });
 });
 
