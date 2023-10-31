@@ -147,6 +147,7 @@ export async function queryDB(query: string, projectId: string) {
       {
         client,
         indexName: projectId,
+        metadataKeys: ["source"],
       }
     );
 
@@ -551,6 +552,11 @@ app.post("/api/chat", async (req: Request, res: Response) => {
         break; // Exit the loop if OpenAI sends a 'stop' signal
       }
     }
+
+    // Send the delimiter
+    res.write(`[END_OF_OPENAI_RESPONSE]
+${relatedDocs.map((doc) => doc.metadata?.source).join(",")}
+              `);
     res.end();
   } catch (error) {
     // Only send a response if headers haven't been sent yet
