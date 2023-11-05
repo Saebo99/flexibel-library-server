@@ -575,10 +575,10 @@ app.post("/api/createModel", async (req, res) => {
 
 const updateLikesDislikes = async (projectId: string, feedback: any) => {
   const metricsCollectionRef = db.collection("metrics");
+  const today = new Date().toISOString().split("T")[0]; // Get current date in YYYY-MM-DD format
 
   try {
     await db.runTransaction(async (transaction: any) => {
-      // Query for the document with a 'projectId' field matching the projectId
       const metricsQuery = metricsCollectionRef.where(
         "projectId",
         "==",
@@ -586,26 +586,53 @@ const updateLikesDislikes = async (projectId: string, feedback: any) => {
       );
       const querySnapshot = await transaction.get(metricsQuery);
 
-      // If the document does not exist, create it with initial counts set to 0
+      // If the document does not exist, create it with today's date
       if (querySnapshot.empty) {
-        const newMetricDocRef = metricsCollectionRef.doc(); // Create a new document reference
+        const newMetricDocRef = metricsCollectionRef.doc();
         transaction.set(newMetricDocRef, {
           projectId: projectId,
-          likeCount: 0,
-          dislikeCount: 0,
+          dailyCounts: {
+            [today]: {
+              messageCount: 0, // Assuming you want to initialize messageCount as well
+              likeCount: feedback.like ? 1 : 0,
+              dislikeCount: feedback.dislike ? 1 : 0,
+            },
+          },
+        });
+      } else {
+        // Process the existing document
+        querySnapshot.forEach((doc: any) => {
+          const metricsData = doc.data();
+
+          // Initialize dailyCounts for today if not present
+          if (!metricsData.dailyCounts || !metricsData.dailyCounts[today]) {
+            transaction.set(
+              doc.ref,
+              {
+                dailyCounts: {
+                  ...metricsData.dailyCounts,
+                  [today]: {
+                    messageCount: 0, // Assuming you want to initialize messageCount as well
+                    likeCount: feedback.like ? 1 : 0,
+                    dislikeCount: feedback.dislike ? 1 : 0,
+                  },
+                },
+              },
+              { merge: true }
+            );
+          } else {
+            // Increment like or dislike count based on the feedback
+            Object.entries(feedback).forEach(([key, value]) => {
+              const incrementField =
+                value === "like" ? "likeCount" : "dislikeCount";
+              transaction.update(doc.ref, {
+                [`dailyCounts.${today}.${incrementField}`]:
+                  admin.firestore.FieldValue.increment(1),
+              });
+            });
+          }
         });
       }
-
-      // Update the likeCount or dislikeCount based on the feedback value
-      querySnapshot.forEach((doc: any) => {
-        Object.entries(feedback).forEach(([key, value]) => {
-          const incrementField =
-            value === "like" ? "likeCount" : "dislikeCount";
-          transaction.update(doc.ref, {
-            [incrementField]: admin.firestore.FieldValue.increment(1),
-          });
-        });
-      });
     });
     console.log("Feedback successfully updated!");
   } catch (error) {
@@ -689,13 +716,11 @@ app.post("/api/feedback/", async (req, res) => {
 });
 
 const updateMessageCount = async (projectId: string) => {
-  // Reference the 'metrics' collection
   const metricsCollectionRef = db.collection("metrics");
 
   try {
-    // Run a transaction to ensure atomic operation and document creation if it doesn't exist
     await db.runTransaction(async (transaction: any) => {
-      // Query for the document with a 'projectId' field matching the projectId
+      const today = new Date().toISOString().split("T")[0]; // Get current date in YYYY-MM-DD format
       const metricsQuery = metricsCollectionRef.where(
         "projectId",
         "==",
@@ -703,21 +728,46 @@ const updateMessageCount = async (projectId: string) => {
       );
       const querySnapshot = await transaction.get(metricsQuery);
 
-      // If the document does not exist, create it
       if (querySnapshot.empty) {
-        const newMetricDocRef = metricsCollectionRef.doc(); // Create a new document reference
+        // Create a new document with today's date as a key for messageCount
+        const newMetricDocRef = metricsCollectionRef.doc();
         transaction.set(newMetricDocRef, {
           projectId: projectId,
-          messageCount: 1,
-          likeCount: 0,
-          dislikeCount: 0,
+          dailyCounts: {
+            [today]: {
+              messageCount: 1,
+              likeCount: 0,
+              dislikeCount: 0,
+            },
+          },
         });
       } else {
-        // There should be only one document in the snapshot; we update the messageCount
         const existingMetricDocRef = querySnapshot.docs[0].ref;
-        transaction.update(existingMetricDocRef, {
-          messageCount: admin.firestore.FieldValue.increment(1),
-        });
+        const metricsData = querySnapshot.docs[0].data();
+
+        // Initialize if today's date is not present
+        if (!metricsData.dailyCounts || !metricsData.dailyCounts[today]) {
+          transaction.set(
+            existingMetricDocRef,
+            {
+              dailyCounts: {
+                ...metricsData.dailyCounts,
+                [today]: {
+                  messageCount: 1,
+                  likeCount: 0,
+                  dislikeCount: 0,
+                },
+              },
+            },
+            { merge: true }
+          );
+        } else {
+          // Increment today's message count
+          transaction.update(existingMetricDocRef, {
+            [`dailyCounts.${today}.messageCount`]:
+              admin.firestore.FieldValue.increment(1),
+          });
+        }
       }
     });
     console.log("Transaction successfully committed!");
@@ -893,12 +943,12 @@ ${relatedDocs.map((doc) => doc.metadata?.source).join(",")}
             timestamp: clientMessageTimestamp,
             content: clientLastMessage.content,
             role: clientLastMessage.role, // Add the role field
-            likeStatus: "",
           },
           {
             messageId: `response-${new Date().getTime()}`,
             timestamp: responseTimestamp,
             content: responseContent,
+            sources: relatedDocs.map((doc) => doc.metadata?.source),
             role: "response", // Set the role for the response
             likeStatus: "",
           }
