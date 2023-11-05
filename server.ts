@@ -247,7 +247,7 @@ app.post("/api/createAPIKey", async (req, res) => {
 
   try {
     // Generate API Key
-    const apiKey = crypto.randomBytes(32).toString("hex");
+    const apiKey = crypto.randomBytes(22).toString("hex");
 
     // Generate a hashed version of the API Key for lookup
     const apiKeyHash = crypto.createHash("sha256").update(apiKey).digest("hex");
@@ -573,9 +573,50 @@ app.post("/api/createModel", async (req, res) => {
   }
 });
 
-app.post("/api/chat", async (req: Request, res: Response) => {
+const updateLikesDislikes = async (projectId: string, feedback: any) => {
+  const metricsCollectionRef = db.collection("metrics");
+
+  try {
+    await db.runTransaction(async (transaction: any) => {
+      // Query for the document with a 'projectId' field matching the projectId
+      const metricsQuery = metricsCollectionRef.where(
+        "projectId",
+        "==",
+        projectId
+      );
+      const querySnapshot = await transaction.get(metricsQuery);
+
+      // If the document does not exist, create it with initial counts set to 0
+      if (querySnapshot.empty) {
+        const newMetricDocRef = metricsCollectionRef.doc(); // Create a new document reference
+        transaction.set(newMetricDocRef, {
+          projectId: projectId,
+          likeCount: 0,
+          dislikeCount: 0,
+        });
+      }
+
+      // Update the likeCount or dislikeCount based on the feedback value
+      querySnapshot.forEach((doc: any) => {
+        Object.entries(feedback).forEach(([key, value]) => {
+          const incrementField =
+            value === "like" ? "likeCount" : "dislikeCount";
+          transaction.update(doc.ref, {
+            [incrementField]: admin.firestore.FieldValue.increment(1),
+          });
+        });
+      });
+    });
+    console.log("Feedback successfully updated!");
+  } catch (error) {
+    console.error("Failed to update feedback:", error);
+  }
+};
+
+// Feedback route
+app.post("/api/feedback/", async (req, res) => {
   const apiKey = req.headers.authorization?.replace("Bearer ", "");
-  const { messages } = req.body;
+  const { feedback, conversationId } = req.body;
 
   if (!apiKey) {
     res.status(401).send("Unauthorized");
@@ -597,6 +638,136 @@ app.post("/api/chat", async (req: Request, res: Response) => {
     // Retrieve projectId and models from the document
     const keyDoc = snapshot.docs[0];
     const projectId = keyDoc.data().projectId;
+
+    // Check if feedback is an object and if the feedbackType is valid
+    if (
+      typeof feedback !== "object" ||
+      Object.values(feedback).some(
+        (type) => type !== "like" && type !== "dislike"
+      )
+    ) {
+      return res.status(400).send("Invalid feedback format or type");
+    }
+
+    // Update likes/dislikes count in metrics
+    await updateLikesDislikes(projectId, feedback);
+
+    // Update conversation message likeStatus
+    const conversationDocRef = db
+      .collection("conversations")
+      .doc(conversationId);
+
+    await db.runTransaction(async (transaction: any) => {
+      console.log("conversationId: ", conversationId);
+      const conversationDoc = await transaction.get(conversationDocRef);
+      if (!conversationDoc.exists) {
+        throw new Error("Conversation document does not exist");
+      }
+      const conversationData = conversationDoc.data();
+      const messages = conversationData.messages;
+      console.log("messages: ", messages);
+
+      // Update the likeStatus for the message at index - 1
+      Object.entries(feedback).forEach(([index, feedbackType]) => {
+        const messageIndex = parseInt(index, 10) - 1; // Convert index to number and subtract 1
+        console.log("messageIndex: ", messageIndex);
+        console.log("feedbackType: ", feedbackType);
+
+        if (messages[messageIndex]) {
+          // Check if the message exists at messageIndex
+          messages[messageIndex].likeStatus = feedbackType; // Update likeStatus
+        }
+      });
+
+      transaction.update(conversationDocRef, { messages });
+    });
+    console.log("Conversation feedback updated!");
+  } catch (error) {
+    console.error("Failed to update conversation feedback:", error);
+    return res.status(500).send("Failed to update conversation feedback");
+  }
+});
+
+const updateMessageCount = async (projectId: string) => {
+  // Reference the 'metrics' collection
+  const metricsCollectionRef = db.collection("metrics");
+
+  try {
+    // Run a transaction to ensure atomic operation and document creation if it doesn't exist
+    await db.runTransaction(async (transaction: any) => {
+      // Query for the document with a 'projectId' field matching the projectId
+      const metricsQuery = metricsCollectionRef.where(
+        "projectId",
+        "==",
+        projectId
+      );
+      const querySnapshot = await transaction.get(metricsQuery);
+
+      // If the document does not exist, create it
+      if (querySnapshot.empty) {
+        const newMetricDocRef = metricsCollectionRef.doc(); // Create a new document reference
+        transaction.set(newMetricDocRef, {
+          projectId: projectId,
+          messageCount: 1,
+          likeCount: 0,
+          dislikeCount: 0,
+        });
+      } else {
+        // There should be only one document in the snapshot; we update the messageCount
+        const existingMetricDocRef = querySnapshot.docs[0].ref;
+        transaction.update(existingMetricDocRef, {
+          messageCount: admin.firestore.FieldValue.increment(1),
+        });
+      }
+    });
+    console.log("Transaction successfully committed!");
+  } catch (error) {
+    console.log("Transaction failed: ", error);
+  }
+};
+
+app.post("/api/chat", async (req: Request, res: Response) => {
+  const apiKey = req.headers.authorization?.replace("Bearer ", "");
+  const { messages, conversationId } = req.body; // Include conversationId in the request body
+
+  if (!apiKey) {
+    res.status(401).send("Unauthorized");
+    return;
+  }
+
+  try {
+    // Validate API Key
+    const apiKeyHash = crypto.createHash("sha256").update(apiKey).digest("hex");
+    const keysCollectionRef = db.collection("keys");
+    const keysQuery = keysCollectionRef.where("apiKeyHashed", "==", apiKeyHash);
+    const snapshot = await keysQuery.get();
+
+    if (snapshot.empty) {
+      res.status(401).send("Invalid API Key");
+      return;
+    }
+
+    // Retrieve projectId and models from the document
+    const keyDoc = snapshot.docs[0];
+    const projectId = keyDoc.data().projectId;
+
+    // Retrieve or create conversation document
+    let conversationDocRef;
+    if (conversationId) {
+      // If a conversationId is provided, retrieve the existing conversation
+      conversationDocRef = db.collection("conversations").doc(conversationId);
+      const conversationDoc = await conversationDocRef.get();
+      if (!conversationDoc.exists) {
+        return res.status(404).send("Conversation not found");
+      }
+    } else {
+      // If no conversationId is provided, create a new conversation document
+      conversationDocRef = db.collection("conversations").doc();
+      await conversationDocRef.set({
+        messages: [],
+        projectId: projectId,
+      }); // You might want to store additional data
+    }
 
     // Fetching the document with the given projectId from the projects collection
     const projectDocRef = db.collection("projects").doc(projectId);
@@ -651,6 +822,10 @@ app.post("/api/chat", async (req: Request, res: Response) => {
       .replace("[chat_history]", chatHistory || "No history")
       .replace("[question]", messages[messages.length - 1].content);
 
+    console.log("promptTemplate: ", promptTemplate);
+
+    await updateMessageCount(projectId);
+
     const completion = await openai.chat.completions.create({
       model: modelData.modelType,
       messages: [{ role: "user", content: promptTemplate }],
@@ -659,6 +834,7 @@ app.post("/api/chat", async (req: Request, res: Response) => {
       temperature: modelData.temperature,
     });
 
+    let responseContent = "";
     // Stream the response to the client
     for await (const chunk of completion) {
       // Check for valid content in the chunk
@@ -669,17 +845,71 @@ app.post("/api/chat", async (req: Request, res: Response) => {
         chunk.choices[0].delta &&
         chunk.choices[0].delta.content
       ) {
-        res.write(JSON.stringify(chunk.choices[0].delta.content));
+        const content = chunk.choices[0].delta.content;
+        responseContent += content;
+        res.write(JSON.stringify(content));
       } else if (chunk.choices[0].finish_reason === "stop") {
         console.warn("Received stop signal from OpenAI.");
         break; // Exit the loop if OpenAI sends a 'stop' signal
       }
     }
 
-    // Send the delimiter
-    res.write(`[END_OF_OPENAI_RESPONSE]
+    // After the OpenAI stream is completed and before closing the response
+    if (!conversationId) {
+      // Only send the new conversation ID if one was not provided in the request
+      res.write(`[NEW_CONVERSATION_ID]
+${conversationDocRef.id}
+[END_OF_OPENAI_RESPONSE]
+${relatedDocs.map((doc) => doc.metadata?.source).join(",")}
+`);
+    } else {
+      // Send the delimiter
+      res.write(`[END_OF_OPENAI_RESPONSE]
 ${relatedDocs.map((doc) => doc.metadata?.source).join(",")}
               `);
+    }
+
+    try {
+      // Generate timestamps
+      const clientMessageTimestamp = new Date().toISOString(); // Timestamp for the last client message
+      const responseTimestamp = new Date().toISOString(); // Timestamp for the API response
+
+      // Ensure there is at least one message to update
+      if (messages.length === 0) {
+        throw new Error("No messages to update.");
+      }
+
+      // Update conversation with the last message from the client and the response from the API
+      const clientLastMessage = messages[messages.length - 1];
+
+      // Create a unique messageId for the client's last message
+      const clientLastMessageId = `client-${new Date().getTime()}`;
+
+      // Construct the update object for the conversation
+      const conversationUpdate = {
+        messages: admin.firestore.FieldValue.arrayUnion(
+          {
+            messageId: clientLastMessageId,
+            timestamp: clientMessageTimestamp,
+            content: clientLastMessage.content,
+            role: clientLastMessage.role, // Add the role field
+            likeStatus: "",
+          },
+          {
+            messageId: `response-${new Date().getTime()}`,
+            timestamp: responseTimestamp,
+            content: responseContent,
+            role: "response", // Set the role for the response
+            likeStatus: "",
+          }
+        ),
+      };
+
+      await conversationDocRef.update(conversationUpdate);
+    } catch (error) {
+      console.error("Error updating conversation document: ", error);
+    }
+
     res.end();
   } catch (error) {
     // Only send a response if headers haven't been sent yet
