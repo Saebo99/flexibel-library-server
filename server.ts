@@ -182,7 +182,7 @@ export async function saveToDB(
       }
     );
   } catch (error) {
-    console.error("Failed to upload document:", document, error);
+    console.error("Failed to upload documents");
     // Continue with the next document even if the current one fails
   }
 }
