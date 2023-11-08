@@ -7,7 +7,6 @@ const crypto = require("crypto");
 import OpenAI from "openai";
 const fs = require("fs").promises;
 const fetch = require("node-fetch");
-const FormData = require("form-data");
 const multer = require("multer");
 import { CheerioWebBaseLoader } from "langchain/document_loaders/web/cheerio";
 import { PDFLoader } from "langchain/document_loaders/fs/pdf";
@@ -55,87 +54,105 @@ async function crawlAndProcess(
     // Check if this URL is already visited or depth is zero
     if (visitedURLs.includes(currentURL) || currentDepth <= 0) continue;
 
-    // Fetch and parse the page content
-    let pageHTML;
     try {
-      pageHTML = await axios.get(currentURL, {
+      // Fetch and parse the page content
+      const response = await axios.get(currentURL, {
         headers: {
           "User-Agent":
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/58.0.3029.110 Safari/537.3",
         },
       });
+      const $ = cheerio.load(response.data);
+
+      // Extract title and description
+      const title = $("title").text().trim();
+      const description =
+        $('meta[name="description"]').attr("content").trim() || "";
+
+      // Get all anchor links and resolve them to absolute URLs
+      $("a").each((index: number, element: any) => {
+        const foundURL = url.resolve(currentURL, $(element).attr("href"));
+
+        // You might want to filter URLs based on some criteria
+        if (
+          !visitedURLs.includes(foundURL) &&
+          !paginationURLsToVisit.some(([url]) => url === foundURL) &&
+          foundURL.startsWith("http") // Ensure it's a valid HTTP URL
+        ) {
+          paginationURLsToVisit.push([foundURL, currentDepth - 1]);
+        }
+      });
+
+      console.log("currentURL: ", currentURL);
+      // Process this URL (Your logic to save data from this URL)
+      const loader = new CheerioWebBaseLoader(currentURL, {
+        selector: "p, span",
+      });
+      const docs = await loader.load();
+
+      const textSplitter = new RecursiveCharacterTextSplitter({
+        chunkSize: 500,
+        chunkOverlap: 0,
+      });
+      const splitDocs = await textSplitter.splitDocuments(docs);
+
+      // Save the data with title and description
+      await saveToDB(splitDocs, projectId, { title, description });
+
+      // Create a new document for the current URL with additional metadata
+      const dataSourcesRef = db
+        .collection("projects")
+        .doc(projectId)
+        .collection("dataSources")
+        .doc();
+
+      await dataSourcesRef.set({
+        source: currentURL,
+        title: title,
+        description: description,
+        charCount: splitDocs.reduce(
+          (sum, doc) => sum + doc.pageContent.length,
+          0
+        ),
+        type: "website",
+        isActive: true,
+        insertedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+
+      // Mark this URL as visited
+      visitedURLs.push(currentURL);
     } catch (error: any) {
-      console.error(`Error fetching URL: ${currentURL}`, error.message);
-      continue; // skip this URL and proceed with the next one
+      console.error(`Error processing URL: ${currentURL}`, error.message);
+      // Continue to the next URL
     }
-    const $ = cheerio.load(pageHTML.data);
-
-    // Get all anchor links and resolve them to absolute URLs
-    $("a").each((index: number, element: any) => {
-      const foundURL = url.resolve(currentURL, $(element).attr("href"));
-
-      // You might want to filter URLs based on some criteria
-      if (
-        !visitedURLs.includes(foundURL) &&
-        !paginationURLsToVisit.some(([url]) => url === foundURL)
-      ) {
-        paginationURLsToVisit.push([foundURL, currentDepth - 1]);
-      }
-    });
-
-    // Process this URL (Your logic to save data from this URL)
-    const loader = new CheerioWebBaseLoader(currentURL, {
-      selector: "p, span",
-    });
-    const docs = await loader.load();
-
-    const textSplitter = new RecursiveCharacterTextSplitter({
-      chunkSize: 500,
-      chunkOverlap: 0,
-    });
-    const splitDocs = await textSplitter.splitDocuments(docs);
-
-    await saveToDB(splitDocs, projectId);
-
-    // Get a reference to the dataSources subcollection in the current project document
-    const dataSourcesRef = db
-      .collection("projects")
-      .doc(projectId)
-      .collection("dataSources")
-      .doc();
-
-    // Create a new document for the current url
-    await dataSourcesRef.set({
-      source: currentURL,
-      charCount: splitDocs.reduce(
-        (sum, doc) => sum + doc.pageContent.length,
-        0
-      ),
-      type: "website",
-      isActive: true,
-      insertedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    // Mark this URL as visited
-    visitedURLs.push(currentURL);
 
     // Delay between requests to respect rate limits and avoid being blocked
     await new Promise((resolve) => setTimeout(resolve, 1000)); // 1 second delay
   }
 }
 
-export async function saveToDB(documents: any[], projectId: string) {
+export async function saveToDB(
+  documents: any[],
+  projectId: string,
+  extraFields?: any
+) {
   console.log("projectId: ", projectId);
 
-  // Filter out undesired fields in metadata
   const sanitizedDocuments = documents.map((document) => {
     const { metadata } = document;
-
-    // Keep only fields that start with "loc" or are "source"
     const sanitizedMetadata: any = {};
+
+    // Add fields from metadata that start with "loc" or are "source"
     for (const key in metadata) {
       if (key.startsWith("loc") || key === "source") {
         sanitizedMetadata[key] = metadata[key];
+      }
+    }
+
+    // Add extra fields if provided
+    if (extraFields) {
+      for (const extraKey in extraFields) {
+        sanitizedMetadata[extraKey] = extraFields[extraKey];
       }
     }
 
@@ -146,24 +163,28 @@ export async function saveToDB(documents: any[], projectId: string) {
     };
   });
 
-  console.log("sanitizedDocuments[0]: ", sanitizedDocuments[0]);
-
-  const client = (weaviate as any).client({
+  const client = weaviate.client({
     scheme: process.env.WEAVIATE_SCHEME || "https",
     host: "my-test-cluster-85hxrlf0.weaviate.network" || "localhost",
-    apiKey: new (weaviate as any).ApiKey(
+    apiKey: new weaviate.ApiKey(
       "7yJQ3ztTXROAtKHQxIt0sj2HWOEVvQ1ncze3" || "default"
     ),
   });
 
-  await WeaviateStore.fromDocuments(
-    sanitizedDocuments,
-    new OpenAIEmbeddings(),
-    {
-      client,
-      indexName: projectId,
-    }
-  );
+  try {
+    // Process one document at a time
+    await WeaviateStore.fromDocuments(
+      sanitizedDocuments,
+      new OpenAIEmbeddings(),
+      {
+        client,
+        indexName: projectId,
+      }
+    );
+  } catch (error) {
+    console.error("Failed to upload document:", document, error);
+    // Continue with the next document even if the current one fails
+  }
 }
 
 export async function queryDB(query: string, projectId: string) {
@@ -200,7 +221,7 @@ export async function queryDB(query: string, projectId: string) {
   }
 }
 
-export async function deleteFromDB(projectId: string, source: string) {
+export async function deleteFromDB(projectId: string, sources: string[]) {
   // Something wrong with the weaviate-ts-client types, so we need to disable
   const client = (weaviate as any).client({
     scheme: process.env.WEAVIATE_SCHEME || "https",
@@ -214,19 +235,21 @@ export async function deleteFromDB(projectId: string, source: string) {
   const store = await WeaviateStore.fromExistingIndex(new OpenAIEmbeddings(), {
     client,
     indexName: projectId,
-    metadataKeys: [source],
+    metadataKeys: ["source"],
   });
 
-  // delete documents with filter
-  await store.delete({
-    filter: {
-      where: {
-        operator: "Equal",
-        path: ["foo"],
-        valueText: "bar",
+  for (const source of sources) {
+    // delete documents with filter
+    await store.delete({
+      filter: {
+        where: {
+          operator: "Equal",
+          path: ["source"],
+          valueText: source,
+        },
       },
-    },
-  });
+    });
+  }
 }
 
 app.post("/api/createAPIKey", async (req, res) => {
@@ -366,6 +389,13 @@ app.post("/api/ingestData", async (req, res) => {
 
   for (let url of urls) {
     try {
+      const response = await axios.get(url); // Use axios to fetch the HTML content
+      const $ = cheerio.load(response.data); // Load HTML content into Cheerio
+
+      // Retrieve title and meta description
+      const title = $("title").text().trim();
+      console.log("title: ", title);
+      const description = $('meta[name="description"]').attr("content").trim();
       if (crawlType === "single") {
         const loader = new CheerioWebBaseLoader(url, {
           selector: "p, span",
@@ -378,7 +408,7 @@ app.post("/api/ingestData", async (req, res) => {
         });
         const splitDocs = await textSplitter.splitDocuments(docs);
 
-        await saveToDB(splitDocs, projectId);
+        await saveToDB(splitDocs, projectId, { title, description });
 
         // Get a reference to the dataSources subcollection in the current project document
         const dataSourcesRef = db
@@ -497,6 +527,56 @@ app.post("/api/ingestFile", upload.single("file"), async (req, res) => {
     insertedAt: admin.firestore.FieldValue.serverTimestamp(),
   });
   res.json({ message: "Data ingestion was successful" });
+});
+
+app.post("/api/deleteData", async (req, res) => {
+  console.log("Deleting data...");
+  const apiKey = req.headers.authorization?.replace("Bearer ", "");
+  const { sources } = req.body;
+
+  if (!apiKey) {
+    res.status(401).send("Unauthorized");
+    return;
+  }
+
+  // Validate API Key
+  const apiKeyHash = crypto.createHash("sha256").update(apiKey).digest("hex");
+  const keysCollectionRef = db.collection("keys");
+  const keysQuery = keysCollectionRef.where("apiKeyHashed", "==", apiKeyHash);
+  const snapshot = await keysQuery.get();
+
+  if (snapshot.empty) {
+    res.status(401).send("Invalid API Key");
+    return;
+  }
+
+  // Retrieve projectId from the document
+  const doc = snapshot.docs[0];
+  const projectId = doc.data().projectId;
+
+  deleteFromDB(projectId, sources);
+
+  // Reference to the project's dataSources collection
+  const dataSourcesRef = db
+    .collection("projects")
+    .doc(projectId)
+    .collection("dataSources");
+
+  try {
+    for (const source of sources) {
+      // Query all documents with the source field equal to the current source
+      const querySnapshot = await dataSourcesRef
+        .where("source", "==", source)
+        .get();
+      querySnapshot.forEach(async (doc: any) => {
+        // Delete documents
+        await dataSourcesRef.doc(doc.id).delete();
+      });
+    }
+    res.json({ message: "Data deletion was successful" });
+  } catch (error: any) {
+    res.status(500).send("Error deleting documents: " + error.message);
+  }
 });
 
 app.post("/api/createModel", async (req, res) => {
@@ -712,6 +792,95 @@ app.post("/api/feedback/", async (req, res) => {
   } catch (error) {
     console.error("Failed to update conversation feedback:", error);
     return res.status(500).send("Failed to update conversation feedback");
+  }
+});
+
+// Function to retrieve the 10 most relevant data pieces
+const getRelevantData = async (searchTerm: string, projectId: string) => {
+  try {
+    console.log("before client");
+    const client = (weaviate as any).client({
+      scheme: process.env.WEAVIATE_SCHEME || "https",
+      host: "my-test-cluster-85hxrlf0.weaviate.network" || "localhost",
+      apiKey: new (weaviate as any).ApiKey(
+        "7yJQ3ztTXROAtKHQxIt0sj2HWOEVvQ1ncze3" || "default"
+      ),
+      headers: {
+        "X-OpenAI-Api-Key":
+          "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",
+      },
+    });
+
+    console.log("before response");
+
+    const response = await client.graphql
+      .get()
+      .withClassName(projectId)
+      .withFields("source title description _additional { score }")
+      .withLimit(3)
+      .withBm25({
+        query: searchTerm,
+        properties: ["text"],
+      })
+      .do();
+
+    const firstKeyArray: any = Object.values(response.data.Get)[0];
+    console.log("firstKeyArray: ", firstKeyArray);
+
+    // Map over the array to create a new list of objects with only the source and score fields.
+    const sourceAndScoreList = firstKeyArray.map((item: any) => ({
+      source: item.source,
+      title: item.title,
+      description: item.description,
+      score: item._additional.score,
+    }));
+
+    console.log(sourceAndScoreList);
+
+    return sourceAndScoreList;
+  } catch (error) {
+    console.error("Error retrieving data:", error);
+    throw error;
+  }
+};
+
+// Define the API route
+app.post("/api/keywordSearch", async (req, res) => {
+  const apiKey = req.headers.authorization?.replace("Bearer ", "");
+  const { searchTerm } = req.body;
+
+  if (!apiKey) {
+    res.status(401).send("Unauthorized");
+    return;
+  }
+
+  try {
+    // Validate API Key
+    const apiKeyHash = crypto.createHash("sha256").update(apiKey).digest("hex");
+    const keysCollectionRef = db.collection("keys");
+    const keysQuery = keysCollectionRef.where("apiKeyHashed", "==", apiKeyHash);
+    const snapshot = await keysQuery.get();
+
+    if (snapshot.empty) {
+      res.status(401).send("Invalid API Key");
+      return;
+    }
+
+    // Retrieve projectId and models from the document
+    const keyDoc = snapshot.docs[0];
+    const projectId = keyDoc.data().projectId;
+
+    if (!searchTerm) {
+      return res.status(400).send({ error: "Search term is required." });
+    }
+
+    const data = await getRelevantData(
+      searchTerm as string,
+      projectId as string
+    );
+    res.send(data);
+  } catch (error: any) {
+    res.status(500).send({ error: error.message });
   }
 });
 
