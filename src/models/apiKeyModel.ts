@@ -17,13 +17,15 @@ export const validateApiKey = async (apiKey: string) => {
 };
 
 export const validateClientKey = async (clientKey: string) => {
+  console.log("clientKey: ", clientKey);
   const clientKeyHash = crypto
     .createHash("sha256")
     .update(clientKey)
     .digest("hex");
+  console.log("clientKeyHash: ", clientKeyHash);
   const clientKeysCollectionRef = db.collection("clientKeys");
   const clientKeysQuery = clientKeysCollectionRef.where(
-    "clientKeyHashed",
+    "apiKeyHashed",
     "==",
     clientKeyHash
   );

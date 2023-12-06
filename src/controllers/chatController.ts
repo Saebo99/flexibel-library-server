@@ -13,7 +13,7 @@ import { createConversation } from "../models/conversationModel";
 
 import OpenAI from "openai";
 const openai = new OpenAI({
-  apiKey: "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",
+  apiKey: "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",
 });
 
 // chat Route code
@@ -22,6 +22,7 @@ export const postChat = async (req: Request, res: Response) => {
   const apiKey = req.headers.authorization?.replace("Bearer ", "");
   const { messages, conversationId } = req.body; // Include conversationId in the request body
 
+  console.log("apiKey: ", apiKey);
   if (!apiKey) {
     res.status(401).send("Unauthorized");
     return;
@@ -103,6 +104,7 @@ export const postChat = async (req: Request, res: Response) => {
 
     await updateMessageCount(projectId);
 
+    console.log("openai api key: ", process.env.OPENAI_API_KEY);
     const completion = await openai.chat.completions.create({
       model: modelData.modelType,
       messages: [{ role: "user", content: promptTemplate }],
@@ -189,6 +191,7 @@ ${relatedDocs.map((doc) => doc.metadata?.source).join(",")}
 
     res.end();
   } catch (error) {
+    console.error("Error: ", error);
     // Only send a response if headers haven't been sent yet
     if (!res.headersSent) {
       res
