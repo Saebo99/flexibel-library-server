@@ -20,11 +20,12 @@ export async function saveToDB(
       ),
     });
     console.log("done setting up client");
+    console.log("client: ", client);
 
     console.log("documents[0].metadata: ", documents[0].metadata);
     const source = documents[0].metadata.source;
 
-    deleteFromDB(projectId, [source]);
+    //deleteFromDB(projectId, [source]);
     console.log("deleteFromDB done");
 
     const sanitizedDocuments = documents.map((document) => {
@@ -69,13 +70,17 @@ export async function saveToDB(
         indexName: projectId,
       }
     );
+    console.log("end of WeaviateStore.fromDocuments");
   } catch (error) {
-    console.error("Failed to upload documents");
+    console.error("Failed to upload documents to Weaviate: ", error);
     // Continue with the next document even if the current one fails
   }
 }
 
 export async function deleteFromDB(projectId: string, sources: string[]) {
+  if (projectId && /^[A-Za-z]/.test(projectId)) {
+    projectId = projectId.charAt(0).toUpperCase() + projectId.slice(1);
+  }
   // Something wrong with the weaviate-ts-client types, so we need to disable
   const client = weaviate.client({
     scheme: process.env.WEAVIATE_SCHEME || "https",

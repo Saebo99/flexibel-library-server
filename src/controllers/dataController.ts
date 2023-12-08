@@ -79,7 +79,11 @@ async function crawlAndProcess(
       const splitDocs = await textSplitter.splitDocuments(docs);
 
       // Save the data with title and description
-      await saveToDB(splitDocs, projectId, { title, description });
+      await saveToDB(splitDocs, projectId, {
+        title,
+        description,
+        type: "website",
+      });
 
       // Create a new document for the current URL with additional metadata
       const dataSourcesRef = db
@@ -146,7 +150,11 @@ export const ingestData = async (req: Request, res: Response) => {
         });
         const splitDocs = await textSplitter.splitDocuments(docs);
 
-        await saveToDB(splitDocs, projectId, { title, description });
+        await saveToDB(splitDocs, projectId, {
+          title,
+          description,
+          type: "website",
+        });
 
         // Get a reference to the dataSources subcollection in the current project document
         const dataSourcesRef = db
@@ -235,7 +243,11 @@ export const ingestFile = async (req: Request, res: Response) => {
   });
   const splitDocs = await textSplitter.splitDocuments(docs);
 
-  await saveToDB(splitDocs, projectId);
+  await saveToDB(splitDocs, projectId, {
+    type: "file",
+    title: fileExtension,
+    description: "File",
+  });
 
   // Get a reference to the dataSources subcollection in the current project document
   const dataSourcesRef = db
@@ -274,7 +286,6 @@ export const ingestVideo = async (req: Request, res: Response) => {
     });
 
     const docs = await loader.load();
-    console.log("docs: ", docs);
 
     const textSplitter = new RecursiveCharacterTextSplitter({
       chunkSize: 500,
@@ -282,7 +293,12 @@ export const ingestVideo = async (req: Request, res: Response) => {
     });
     const splitDocs = await textSplitter.splitDocuments(docs);
 
-    await saveToDB(splitDocs, projectId);
+    console.log("entering save to db: ", docs[0].metadata);
+    await saveToDB(splitDocs, projectId, {
+      title: docs[0].metadata.title,
+      description: docs[0].metadata.author,
+      type: "video",
+    });
 
     // Get a reference to the dataSources subcollection in the current project document
     const dataSourcesRef = db
@@ -388,6 +404,9 @@ export const ingestFaq = async (req: Request, res: Response) => {
     await saveToDB([doc], projectId, {
       faqGroupName: faqGroupName || question,
       isActive,
+      title: question,
+      description: "FAQ",
+      type: "faq",
     });
 
     res.json({ newFaqId: faqId });
@@ -472,6 +491,9 @@ export const ingestImprovedAnswer = async (req: Request, res: Response) => {
     await saveToDB([doc], projectId, {
       improvedAnswerId: improvedAnswerId || dataSourcesDocRef.id,
       isActive: true,
+      title: question,
+      description: "Improved Answer",
+      type: "improved answer",
     });
 
     // Locate the conversation document

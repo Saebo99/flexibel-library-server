@@ -6,6 +6,9 @@ import weaviate from "weaviate-ts-client";
 import { WeaviateStore } from "langchain/vectorstores/weaviate";
 
 export const queryDB = async (query: string, projectId: string) => {
+  if (projectId && /^[A-Za-z]/.test(projectId)) {
+    projectId = projectId.charAt(0).toUpperCase() + projectId.slice(1);
+  }
   // Something wrong with the weaviate-ts-client types, so we need to disable
   const client = (weaviate as any).client({
     scheme: process.env.WEAVIATE_SCHEME || "https",
@@ -172,6 +175,9 @@ export const getRelevantData = async (
   projectId: string
 ) => {
   try {
+    if (projectId && /^[A-Za-z]/.test(projectId)) {
+      projectId = projectId.charAt(0).toUpperCase() + projectId.slice(1);
+    }
     console.log("before client");
     const client = (weaviate as any).client({
       scheme: process.env.WEAVIATE_SCHEME || "https",
@@ -191,7 +197,7 @@ export const getRelevantData = async (
     const response = await client.graphql
       .get()
       .withClassName(projectId)
-      .withFields("source title description _additional { score }")
+      .withFields("source title description type _additional { score }")
       .withLimit(3)
       .withBm25({
         query: searchTerm,
@@ -207,6 +213,7 @@ export const getRelevantData = async (
       source: item.source,
       title: item.title,
       description: item.description,
+      type: item.type,
       score: item._additional.score,
     }));
 
