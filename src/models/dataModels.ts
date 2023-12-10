@@ -64,7 +64,9 @@ export async function saveToDB(
     // Process one document at a time
     await WeaviateStore.fromDocuments(
       sanitizedDocuments,
-      new OpenAIEmbeddings(),
+      new OpenAIEmbeddings({
+        openAIApiKey: process.env.OPENAI_API_KEY || "",
+      }),
       {
         client,
         indexName: projectId,
@@ -91,11 +93,16 @@ export async function deleteFromDB(projectId: string, sources: string[]) {
   });
 
   // Create a store for an existing index
-  const store = await WeaviateStore.fromExistingIndex(new OpenAIEmbeddings(), {
-    client,
-    indexName: projectId,
-    metadataKeys: ["source"],
-  });
+  const store = await WeaviateStore.fromExistingIndex(
+    new OpenAIEmbeddings({
+      openAIApiKey: process.env.OPENAI_API_KEY || "",
+    }),
+    {
+      client,
+      indexName: projectId,
+      metadataKeys: ["source"],
+    }
+  );
 
   for (const source of sources) {
     // delete documents with filter

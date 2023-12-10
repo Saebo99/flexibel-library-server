@@ -21,7 +21,9 @@ export const queryDB = async (query: string, projectId: string) => {
   try {
     // Create a store for an existing index
     const store = await WeaviateStore.fromExistingIndex(
-      new OpenAIEmbeddings(),
+      new OpenAIEmbeddings({
+        openAIApiKey: process.env.OPENAI_API_KEY || "",
+      }),
       {
         client,
         indexName: projectId,
