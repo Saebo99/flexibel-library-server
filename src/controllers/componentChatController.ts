@@ -14,7 +14,6 @@ import { createConversation } from "../models/conversationModel";
 
 // chat Route code
 export const componentPostChat = async (req: Request, res: Response) => {
-  console.log("postChat");
   const clientKey = req.headers.authorization?.replace("Bearer ", "");
   const { messages, conversationId } = req.body; // Include conversationId in the request body
 
@@ -62,6 +61,7 @@ export const componentPostChat = async (req: Request, res: Response) => {
     }
 
     const { relatedDocs, similarityScore }: any = await queryDB(queryParam, projectId);
+    console.log("queried DB: ", relatedDocs)
 
     // Find the key that has a value equal to true within the models object
     const modelKey = Object.keys(models).find((key) => models[key] === true);

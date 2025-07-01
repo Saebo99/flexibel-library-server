@@ -41,14 +41,19 @@ export async function saveToDB(
 
   // 3) build Azure Search docs
   const searchDocs = enriched.map((d, i) => ({
-    chunkId: d.chunkId,
-    projectId: d.metadata.projectId,
-    sourceId: d.metadata.source || "unknown",
-    text: d.pageContent,
-    embedding: vectors[i],
-    ...(d.metadata.title && { title: d.metadata.title }),
-    ...(d.metadata.description && { description: d.metadata.description }),
-    ...(d.metadata.type && { type: d.metadata.type }),
+    id: d.chunkId,                   // <-- DEFAULT_FIELD_ID is "id"
+    content: d.pageContent,          // <-- matches DEFAULT_FIELD_CONTENT
+    content_vector: vectors[i],      // <-- matches DEFAULT_FIELD_CONTENT_VECTOR
+    metadata: {
+      source: d.metadata.source ?? "unknown",
+      attributes: [
+        { key: "projectId", value: d.metadata.projectId },
+        ...(d.metadata.type ? [{ key: "type", value: d.metadata.type }] : [])
+      ]
+    },
+    title: d.metadata.title ?? "",
+    description: d.metadata.description ?? "",
+    type: d.metadata.type ?? ""
   }));
 
   // 4) upload (max 1000 docs per batch)
