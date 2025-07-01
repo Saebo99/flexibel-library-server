@@ -1,121 +1,67 @@
-const admin = require("firebase-admin");
+import { v4 as uuidv4 } from "uuid";
+import { AzureKeyCredential, SearchClient } from "@azure/search-documents";
+import { AzureOpenAIEmbeddings } from "@langchain/openai";
+import admin from "firebase-admin";
 import { db } from "../firebase/db";
-import { OpenAIEmbeddings } from "langchain/embeddings/openai";
-import weaviate from "weaviate-ts-client";
-import { WeaviateStore } from "langchain/vectorstores/weaviate";
+
+const searchClient = new SearchClient(
+  process.env.SEARCH_ENDPOINT!,               // https://flexibel-search-ai.search.windows.net
+  "flexibel-index",                           // your index name
+  new AzureKeyCredential(process.env.SEARCH_ADMIN_KEY!)
+);
+
+// ---------- Embedding model ----------
+const embeddings = new AzureOpenAIEmbeddings({
+  azureOpenAIApiEmbeddingsDeploymentName: "text-embedding-3-small",
+  azureOpenAIApiKey: "2xTMgvtKOhkgmcDGGARcuG54fhqGIA98jhMFGvrL4caXiPRjcyJmJQQJ99BGACHYHv6XJ3w3AAAAACOGj0XC", // In Node.js defaults to process.env.AZURE_OPENAI_API_KEY
+  azureOpenAIApiVersion: "2024-02-01",
+  azureOpenAIBasePath: "https://patri-mckkdq7n-eastus2.cognitiveservices.azure.com/openai/deployments/text-embedding-3-small/embeddings?api-version=2023-05-15"
+});
 
 export async function saveToDB(
   documents: any[],
   projectId: string,
-  extraFields?: any
+  extraFields: Record<string, any> = {}
 ) {
-  console.log("projectId: ", projectId);
+  // 1) enrich metadata first
+  const enriched = documents.map(d => ({
+    ...d,
+    metadata: {
+      ...(d.metadata || {}),
+      projectId,
+      ...extraFields
+    },
+    chunkId: d.metadata?.chunkId ?? uuidv4()   // PK in the index
+  }));
 
-  try {
-    const client = (weaviate as any).client({
-      scheme: process.env.WEAVIATE_SCHEME || "https",
-      host: "flexibel-test-cluster-8ucecmqf.weaviate.network" || "localhost",
-      apiKey: new (weaviate as any).ApiKey(
-        "IPlba3vSCgG0agCa3O22SVXDMNlDfrF2pRRo" || "default"
-      ),
-    });
-    console.log("done setting up client");
-    console.log("client: ", client);
-
-    console.log("documents[0].metadata: ", documents[0].metadata);
-    const source = documents[0].metadata.source;
-
-    //deleteFromDB(projectId, [source]);
-    console.log("deleteFromDB done");
-
-    const sanitizedDocuments = documents.map((document) => {
-      const { metadata } = document;
-      const sanitizedMetadata: any = {};
-
-      console.log("beginning of sanitizedDocuments");
-      // Add fields from metadata that start with "loc" or are "source"
-      for (const key in metadata) {
-        if (key.startsWith("loc") || key === "source") {
-          sanitizedMetadata[key] = metadata[key];
-        }
-      }
-      console.log("end of sanitizedDocuments");
-
-      // Set isActive field based on extraFields or default to true
-      sanitizedMetadata["isActive"] = extraFields?.isActive ?? true;
-
-      console.log("beginning of document");
-      // Add extra fields if provided
-      if (extraFields) {
-        for (const extraKey in extraFields) {
-          sanitizedMetadata[extraKey] = extraFields[extraKey];
-        }
-      }
-      console.log("end of document");
-
-      // Return the updated document
-      return {
-        ...document,
-        metadata: sanitizedMetadata,
-      };
-    });
-    console.log("end of sanitizedDocumentsadsfasdfadsf");
-
-    // Process one document at a time
-    await WeaviateStore.fromDocuments(
-      sanitizedDocuments,
-      new OpenAIEmbeddings({
-        openAIApiKey: process.env.OPENAI_API_KEY || "",
-      }),
-      {
-        client,
-        indexName: projectId,
-      }
-    );
-    console.log("end of WeaviateStore.fromDocuments");
-  } catch (error) {
-    console.error("Failed to upload documents to Weaviate: ", error);
-    // Continue with the next document even if the current one fails
-  }
-}
-
-export async function deleteFromDB(projectId: string, sources: string[]) {
-  if (projectId && /^[A-Za-z]/.test(projectId)) {
-    projectId = projectId.charAt(0).toUpperCase() + projectId.slice(1);
-  }
-  // Something wrong with the weaviate-ts-client types, so we need to disable
-  const client = weaviate.client({
-    scheme: process.env.WEAVIATE_SCHEME || "https",
-    host: "flexibel-test-cluster-8ucecmqf.weaviate.network" || "localhost",
-    apiKey: new weaviate.ApiKey(
-      "IPlba3vSCgG0agCa3O22SVXDMNlDfrF2pRRo" || "default"
-    ),
-  });
-
-  // Create a store for an existing index
-  const store = await WeaviateStore.fromExistingIndex(
-    new OpenAIEmbeddings({
-      openAIApiKey: process.env.OPENAI_API_KEY || "",
-    }),
-    {
-      client,
-      indexName: projectId,
-      metadataKeys: ["source"],
-    }
+  // 2) embed texts (assume chunk text lives on `pageContent`)
+  const vectors = await embeddings.embedDocuments(
+    enriched.map(d => d.pageContent)
   );
 
-  for (const source of sources) {
-    // delete documents with filter
-    await store.delete({
-      filter: {
-        where: {
-          operator: "Equal",
-          path: ["source"],
-          valueText: source,
-        },
-      },
-    });
-  }
+  // 3) build Azure Search docs
+  const searchDocs = enriched.map((d, i) => ({
+    chunkId: d.chunkId,
+    projectId: d.metadata.projectId,
+    sourceId: d.metadata.source || "unknown",
+    text: d.pageContent,
+    embedding: vectors[i],
+    ...(d.metadata.title && { title: d.metadata.title }),
+    ...(d.metadata.description && { description: d.metadata.description }),
+    ...(d.metadata.type && { type: d.metadata.type }),
+  }));
+
+  // 4) upload (max 1000 docs per batch)
+  await searchClient.uploadDocuments(searchDocs);
+  console.log(`✅ Uploaded ${searchDocs.length} chunks for project ${projectId}`);
 }
 
-// Additional functions for data processing and Firestore interactions...
+/* ---------- DELETE (soft delete by key list) ---------- */
+export async function deleteFromDB(projectId: string, sources: string[]) {
+  try {
+    const keys = sources.map(s => ({ chunkId: `${projectId}-${s}` }));
+    await searchClient.deleteDocuments(keys);
+  } catch (err) {
+    console.error("Azure AI Search delete failed:", err);
+  }
+}

@@ -1,83 +1,85 @@
 const admin = require("firebase-admin");
 import { db } from "../firebase/db";
 
-import { OpenAIEmbeddings } from "langchain/embeddings/openai";
-import weaviate from "weaviate-ts-client";
-import { WeaviateStore } from "langchain/vectorstores/weaviate";
+import { OpenAIEmbeddings } from "@langchain/openai";
 
-export const queryDB = async (query: string, projectId: string) => {
-  if (projectId && /^[A-Za-z]/.test(projectId)) {
-    projectId = projectId.charAt(0).toUpperCase() + projectId.slice(1);
-  }
-  // Something wrong with the weaviate-ts-client types, so we need to disable
-  const client = (weaviate as any).client({
-    scheme: process.env.WEAVIATE_SCHEME || "https",
-    host: "flexibel-test-cluster-8ucecmqf.weaviate.network" || "localhost",
-    apiKey: new (weaviate as any).ApiKey(
-      "IPlba3vSCgG0agCa3O22SVXDMNlDfrF2pRRo" || "default"
-    ),
-  });
+export const queryDB = async () => ({
+  relatedDocs: [],
+  similarityScore: 0
+})
 
-  try {
-    // Create a store for an existing index
-    const store = await WeaviateStore.fromExistingIndex(
-      new OpenAIEmbeddings({
-        openAIApiKey: process.env.OPENAI_API_KEY || "",
-      }),
-      {
-        client,
-        indexName: projectId,
-        metadataKeys: ["source"],
-      }
-    );
+export const updateConversationAndMetrics = async (
+  projectId: string,
+  conversationId: string,
+  classification: any
+) => {
+  console.log("Updating conversation and metrics");
+  console.log("classification: ", classification);
 
-    // Search the index with a filter, in this case, only return results where
-    // the "foo" metadata key is equal to "baz", see the Weaviate docs for more
-    // https://weaviate.io/developers/weaviate/api/graphql/filters
-    const results = await store.similaritySearch(query, 3);
-    return results;
-  } catch (error: any) {
-    console.error("Error creating store from existing index:", error.message);
-
-    // If an error occurs (e.g., no index matching the projectId), return an empty list
-    return [];
-  }
-};
-
-export const updateMessageCount = async (projectId: string) => {
   const metricsCollectionRef = db.collection("metrics");
+  const conversationsCollectionRef = db.collection("conversations");
 
   try {
     await db.runTransaction(async (transaction: any) => {
       const today = new Date().toISOString().split("T")[0]; // Get current date in YYYY-MM-DD format
+
+      // Update Metrics Collection
       const metricsQuery = metricsCollectionRef.where(
         "projectId",
         "==",
         projectId
       );
-      const querySnapshot = await transaction.get(metricsQuery);
+      const metricsQuerySnapshot = await transaction.get(metricsQuery);
 
-      if (querySnapshot.empty) {
-        // Create a new document with today's date as a key for messageCount
-        const newMetricDocRef = metricsCollectionRef.doc();
-        transaction.set(newMetricDocRef, {
+      const conversationDocRef = conversationsCollectionRef.doc(conversationId);
+      const conversationDoc = await transaction.get(conversationDocRef);
+
+      if (!conversationDoc.exists) {
+        throw new Error("Conversation not found");
+      }
+
+      let metricsDocRef;
+      if (metricsQuerySnapshot.empty) {
+        console.log("Creating new metrics document");
+        metricsDocRef = metricsCollectionRef.doc();
+        transaction.set(metricsDocRef, {
           projectId: projectId,
           dailyCounts: {
             [today]: {
-              messageCount: 1,
+              messageCount: admin.firestore.FieldValue.increment(1),
               likeCount: 0,
               dislikeCount: 0,
+              // Additional classification counts
+              escalationCount: classification.escalation ? 1 : 0,
+              resolutionCount: classification.resolution ? 1 : 0,
+              questionTypeCounts: {
+                [classification.questionType]: 1,
+              },
+              positiveSentimentCount:
+                classification.sentimentAnalysis === "positive" ? 1 : 0,
+              negativeSentimentCount:
+                classification.sentimentAnalysis === "negative" ? 1 : 0,
+              neutralSentimentCount:
+                classification.sentimentAnalysis === "neutral" ? 1 : 0,
+              sourceConfidence: {
+                cumulativeScore: classification.similarityScore || 0, // Assuming similarityScore is a number
+                count: 1,
+                average: classification.similarityScore || 0,
+              },
             },
           },
         });
       } else {
-        const existingMetricDocRef = querySnapshot.docs[0].ref;
-        const metricsData = querySnapshot.docs[0].data();
+        console.log("Updating existing metrics document");
+        metricsDocRef = metricsQuerySnapshot.docs[0].ref;
+        const metricsData = metricsQuerySnapshot.docs[0].data();
+        let newCumulativeScore, newCount, newAverage;
 
         // Initialize if today's date is not present
         if (!metricsData.dailyCounts || !metricsData.dailyCounts[today]) {
+          console.log("Initializing today's date");
           transaction.set(
-            existingMetricDocRef,
+            metricsDocRef,
             {
               dailyCounts: {
                 ...metricsData.dailyCounts,
@@ -85,23 +87,85 @@ export const updateMessageCount = async (projectId: string) => {
                   messageCount: 1,
                   likeCount: 0,
                   dislikeCount: 0,
+                  // Additional classification counts initialization
+                  escalationCount: classification.escalation ? 1 : 0,
+                  resolutionCount: classification.resolution ? 1 : 0,
+                  questionTypeCounts: {
+                    [classification.questionType]: 1,
+                  },
+                  positiveSentimentCount:
+                    classification.sentimentAnalysis === "positive" ? 1 : 0,
+                  negativeSentimentCount:
+                    classification.sentimentAnalysis === "negative" ? 1 : 0,
+                  neutralSentimentCount:
+                    classification.sentimentAnalysis === "neutral" ? 1 : 0,
+                  sourceConfidence: {
+                    cumulativeScore: classification.similarityScore || 0, // Assuming similarityScore is a number
+                    count: 1,
+                    average: classification.similarityScore || 0,
+                  },
                 },
               },
             },
             { merge: true }
           );
         } else {
-          // Increment today's message count
-          transaction.update(existingMetricDocRef, {
-            [`dailyCounts.${today}.messageCount`]:
+          // When updating existing metrics document
+          const existingData = metricsData.dailyCounts[today];
+          newCumulativeScore =
+            (existingData.sourceConfidence?.cumulativeScore || 0) +
+            (classification.similarityScore || 0);
+          newCount = (existingData.sourceConfidence?.count || 0) + 1;
+          newAverage = newCumulativeScore / newCount;
+          console.log("Incrementing today's date");
+          console.log("classification.escalation: ", classification.escalation);
+          // Update metrics counts
+          const updatePath = `dailyCounts.${today}`;
+          transaction.update(metricsDocRef, {
+            [`${updatePath}.messageCount`]:
               admin.firestore.FieldValue.increment(1),
+            [`${updatePath}.escalationCount`]: classification.escalation
+              ? admin.firestore.FieldValue.increment(1)
+              : 0,
+            [`${updatePath}.resolutionCount`]: classification.resolution
+              ? admin.firestore.FieldValue.increment(1)
+              : 0,
+            [`${updatePath}.questionTypeCounts.${classification.questionType}`]:
+              admin.firestore.FieldValue.increment(1),
+            [`${updatePath}.positiveSentimentCount`]:
+              classification.sentimentAnalysis === "positive"
+                ? admin.firestore.FieldValue.increment(1)
+                : 0,
+            [`${updatePath}.negativeSentimentCount`]:
+              classification.sentimentAnalysis === "negative"
+                ? admin.firestore.FieldValue.increment(1)
+                : 0,
+            [`${updatePath}.neutralSentimentCount`]:
+              classification.sentimentAnalysis === "neutral"
+                ? admin.firestore.FieldValue.increment(1)
+                : 0,
+            [`${updatePath}.sourceConfidence.cumulativeScore`]:
+              admin.firestore.FieldValue.increment(
+                classification.similarityScore || 0
+              ),
+            [`${updatePath}.sourceConfidence.count`]:
+              admin.firestore.FieldValue.increment(1),
+            [`${updatePath}.sourceConfidence.average`]: newAverage,
           });
         }
       }
+
+      // Update Conversation Collection
+      const conversationData = conversationDoc.data();
+      const lastMessageIndex = conversationData.messages.length - 1;
+      transaction.update(conversationDocRef, {
+        [`messages.${lastMessageIndex}.classification`]: classification,
+      });
     });
+
     console.log("Transaction successfully committed!");
   } catch (error) {
-    console.log("Transaction failed: ", error);
+    console.error("Transaction failed: ", error);
   }
 };
 
@@ -181,33 +245,10 @@ export const getRelevantData = async (
       projectId = projectId.charAt(0).toUpperCase() + projectId.slice(1);
     }
     console.log("before client");
-    const client = (weaviate as any).client({
-      scheme: process.env.WEAVIATE_SCHEME || "https",
-      host: "flexibel-test-cluster-8ucecmqf.weaviate.network" || "localhost",
-
-      apiKey: new (weaviate as any).ApiKey(
-        "IPlba3vSCgG0agCa3O22SVXDMNlDfrF2pRRo" || "default"
-      ),
-      headers: {
-        "X-OpenAI-Api-Key":
-          "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",
-      },
-    });
 
     console.log("before response");
 
-    const response = await client.graphql
-      .get()
-      .withClassName(projectId)
-      .withFields("source title description type _additional { score }")
-      .withLimit(3)
-      .withBm25({
-        query: searchTerm,
-        properties: ["text"],
-      })
-      .do();
-
-    const firstKeyArray: any = Object.values(response.data.Get)[0];
+    const firstKeyArray: any = []
     console.log("firstKeyArray: ", firstKeyArray);
 
     // Map over the array to create a new list of objects with only the source and score fields.

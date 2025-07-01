@@ -1,18 +1,18 @@
 import { Request, Response } from "express";
 import axios from "axios";
-import cheerio from "cheerio";
+import * as cheerio from "cheerio";
 import { db } from "../firebase/db";
 
 import * as url from "url";
 const crypto = require("crypto");
 const fs = require("fs").promises;
 import path from "path";
-import { CheerioWebBaseLoader } from "langchain/document_loaders/web/cheerio";
-import { PDFLoader } from "langchain/document_loaders/fs/pdf";
-import { DocxLoader } from "langchain/document_loaders/fs/docx";
+import { CheerioWebBaseLoader } from "@langchain/community/document_loaders/web/cheerio";
+import { PDFLoader } from "@langchain/community/document_loaders/fs/pdf";
+import { DocxLoader } from "@langchain/community/document_loaders/fs/docx";
 import { TextLoader } from "langchain/document_loaders/fs/text";
 import { JSONLoader } from "langchain/document_loaders/fs/json";
-import { YoutubeLoader } from "langchain/document_loaders/web/youtube";
+import { YoutubeLoader } from "@langchain/community/document_loaders/web/youtube";
 import { RecursiveCharacterTextSplitter } from "langchain/text_splitter";
 import { Document } from "langchain/document";
 const admin = require("firebase-admin");
@@ -128,15 +128,16 @@ export const ingestData = async (req: Request, res: Response) => {
 
   // Validate API Key
   const projectId = await validateApiKey(apiKey);
+  console.log("projectId: ", projectId)
 
   for (let url of urls) {
+    console.log("url: ", url)
     try {
       const response = await axios.get(url); // Use axios to fetch the HTML content
       const $ = cheerio.load(response.data); // Load HTML content into Cheerio
 
       // Retrieve title and meta description
       const title = $("title").text().trim();
-      console.log("title: ", title);
       const description = $('meta[name="description"]').attr("content")?.trim();
       if (crawlType === "single") {
         const loader = new CheerioWebBaseLoader(url, {
@@ -155,6 +156,8 @@ export const ingestData = async (req: Request, res: Response) => {
           description,
           type: "website",
         });
+
+        console.log("after saveToDB")
 
         // Get a reference to the dataSources subcollection in the current project document
         const dataSourcesRef = db
@@ -448,6 +451,7 @@ export const ingestImprovedAnswer = async (req: Request, res: Response) => {
 
     let dataSourcesDocRef;
     if (improvedAnswerId) {
+      console.log("improvedAnswerId: ", improvedAnswerId);
       // Check if a document with the provided ID exists
       dataSourcesDocRef = dataSourcesRef.doc(improvedAnswerId);
       const docSnapshot = await dataSourcesDocRef.get();
@@ -464,6 +468,9 @@ export const ingestImprovedAnswer = async (req: Request, res: Response) => {
           .send("Document with the provided ID does not exist.");
       }
     } else {
+      console.log("no improvedAnswerId provided");
+      console.log("conversationId: ", conversationId);
+      console.log("messageId: ", messageId);
       // Create a new document
       dataSourcesDocRef = dataSourcesRef.doc();
       await dataSourcesDocRef.set({
@@ -472,6 +479,8 @@ export const ingestImprovedAnswer = async (req: Request, res: Response) => {
         answer: answer,
         type: "improved answer",
         isActive: true,
+        conversationId: conversationId,
+        messageId: messageId,
         insertedAt: admin.firestore.FieldValue.serverTimestamp(),
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });

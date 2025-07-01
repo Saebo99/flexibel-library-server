@@ -4,17 +4,13 @@ const admin = require("firebase-admin");
 import { db } from "../firebase/db";
 import {
   queryDB,
-  updateMessageCount,
+  updateConversationAndMetrics,
   updateLikesDislikes,
-  getRelevantData,
+  getRelevantData
 } from "../models/chatModels";
+import { llm } from "../utils/openai";
 import { validateClientKey } from "../models/apiKeyModel";
 import { createConversation } from "../models/conversationModel";
-
-import OpenAI from "openai";
-const openai = new OpenAI({
-  apiKey: "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",
-});
 
 // chat Route code
 export const componentPostChat = async (req: Request, res: Response) => {
@@ -72,9 +68,9 @@ export const componentPostChat = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Messages are required" });
     }
 
-    const relatedDocs = await queryDB(queryParam, projectId);
+    const { relatedDocs, similarityScore }: any = await queryDB();
 
-    console.log("relatedDocs: ", relatedDocs);
+    console.log("relatedDocs.metadata: ", relatedDocs.metadata);
 
     console.log("finding model");
     // Find the key that has a value equal to true within the models object
@@ -102,43 +98,25 @@ export const componentPostChat = async (req: Request, res: Response) => {
       .map((msg: any) => `${msg.role}: ${msg.content}`)
       .join("\n");
 
-    const promptTemplate = modelData.prompt
-      .replace(
-        "[context]",
-        `${relatedDocs.map((doc) => doc.pageContent).join("\n\n")}`
-      )
-      .replace("[chat_history]", chatHistory || "No history")
-      .replace("[question]", messages[messages.length - 1].content);
+    const systemPrompt = modelData.prompt || "You are a helpful assistant.";
+    const userPrompt = messages[messages.length - 1].content;
 
-    console.log("promptTemplate: ", promptTemplate);
-
-    await updateMessageCount(projectId);
-
-    const completion = await openai.chat.completions.create({
-      model: modelData.modelType,
-      messages: [{ role: "user", content: promptTemplate }],
-      stream: true,
-      max_tokens: modelData.responseLength,
-      temperature: modelData.temperature,
-    });
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
 
     let responseContent = "";
-    // Stream the response to the client
-    for await (const chunk of completion) {
-      // Check for valid content in the chunk
-      if (
-        chunk &&
-        chunk.choices &&
-        chunk.choices[0] &&
-        chunk.choices[0].delta &&
-        chunk.choices[0].delta.content
-      ) {
-        const content = chunk.choices[0].delta.content;
-        responseContent += content;
-        res.write(JSON.stringify(content));
-      } else if (chunk.choices[0].finish_reason === "stop") {
-        console.warn("Received stop signal from OpenAI.");
-        break; // Exit the loop if OpenAI sends a 'stop' signal
+
+    // llm.stream() yields tokens one by one
+    const stream = await llm.stream(
+      [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ]
+    );
+
+    for await (const chunk of stream) {
+      if (chunk?.content) {
+        responseContent += chunk.content;
+        res.write(JSON.stringify(chunk.content));
       }
     }
 
@@ -148,12 +126,12 @@ export const componentPostChat = async (req: Request, res: Response) => {
       res.write(`[NEW_CONVERSATION_ID]
 ${conversationDocRef.id}
 [END_OF_OPENAI_RESPONSE]
-${relatedDocs.map((doc) => doc.metadata?.source).join(",")}
+${relatedDocs.map((doc: any) => doc.metadata?.source).join(",")}
 `);
     } else {
       // Send the delimiter
       res.write(`[END_OF_OPENAI_RESPONSE]
-${relatedDocs.map((doc) => doc.metadata?.source).join(",")}
+${relatedDocs.map((doc: any) => doc.metadata?.source).join(",")}
               `);
     }
 
@@ -186,7 +164,7 @@ ${relatedDocs.map((doc) => doc.metadata?.source).join(",")}
             messageId: `response-${new Date().getTime()}`,
             timestamp: responseTimestamp,
             content: responseContent,
-            sources: relatedDocs.map((doc) => doc.metadata?.source),
+            sources: relatedDocs.map((doc: any) => doc.metadata?.source),
             role: "response", // Set the role for the response
             likeStatus: "",
           }
@@ -194,6 +172,59 @@ ${relatedDocs.map((doc) => doc.metadata?.source).join(",")}
       };
 
       await conversationDocRef.update(conversationUpdate);
+
+      const questionTypes = ["Type1", "Type2", "Type3"]; // Replace with actual types
+      const conversationMessage = `
+  [START OF CONVERSATION]
+  QUESTION:
+    ${messages[messages.length - 1].content}
+
+
+  RESPONSE:
+    ${responseContent}
+  [END OF CONVERSATION]
+
+[START OF INSTRUCTIONS]
+  Analyze the conversation and classify.
+    
+  {
+    escalation: Determine if the conversation was escalated to a human. (true/false)
+    resolution: Assess if the query was resolved. (true/false)
+    questionType: Categorize the question based on predefined types (${questionTypes.join(
+        ", "
+      )}), or suggest a new type. (string)
+    sentimentAnalysis: Analyze the sentiment of the conversation. (positive/negative/neutral)
+    personalInformation: Detect if the conversation contains personal information about the customer. (true/false)
+  }
+  [END OF INSTRUCTIONS]
+
+  Begin!
+`;
+
+      const classMsg = await llm.invoke(
+        [
+          {
+            role: "system",
+            content:
+              "Your task is to analyze a conversation and classify it in JSON format.",
+          },
+          { role: "user", content: conversationMessage },
+        ],
+        {
+          response_format: { type: "json_object" }
+        }
+      );
+
+      const classificationResponse = JSON.parse(classMsg.content as string);
+      // Add the similarity score to the classification response
+      classificationResponse.similarityScore = similarityScore;
+      console.log("classificationResponse: ", classificationResponse);
+
+      await updateConversationAndMetrics(
+        projectId,
+        conversationId,
+        classificationResponse
+      );
     } catch (error) {
       console.error("Error updating conversation document: ", error);
     }

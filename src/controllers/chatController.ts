@@ -4,7 +4,7 @@ const admin = require("firebase-admin");
 import { db } from "../firebase/db";
 import {
   queryDB,
-  updateMessageCount,
+  updateConversationAndMetrics,
   updateLikesDislikes,
   getRelevantData,
 } from "../models/chatModels";
@@ -66,7 +66,7 @@ export const postChat = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Messages are required" });
     }
 
-    const relatedDocs = await queryDB(queryParam, projectId);
+    const { relatedDocs, similarityScore } = await queryDB();
 
     // Find the key that has a value equal to true within the models object
     const modelKey = Object.keys(models).find((key) => models[key] === true);
@@ -95,14 +95,12 @@ export const postChat = async (req: Request, res: Response) => {
     const promptTemplate = modelData.prompt
       .replace(
         "[context]",
-        `${relatedDocs.map((doc) => doc.pageContent).join("\n\n")}`
+        `${relatedDocs.map((doc: any) => doc.pageContent).join("\n\n")}`
       )
       .replace("[chat_history]", chatHistory || "No history")
       .replace("[question]", messages[messages.length - 1].content);
 
     console.log("promptTemplate: ", promptTemplate);
-
-    await updateMessageCount(projectId);
 
     console.log("openai api key: ", process.env.OPENAI_API_KEY);
     const completion = await openai.chat.completions.create({
@@ -139,12 +137,12 @@ export const postChat = async (req: Request, res: Response) => {
       res.write(`[NEW_CONVERSATION_ID]
 ${conversationDocRef.id}
 [END_OF_OPENAI_RESPONSE]
-${relatedDocs.map((doc) => doc.metadata?.source).join(",")}
+${relatedDocs.map((doc: any) => doc.metadata?.source).join(",")}
 `);
     } else {
       // Send the delimiter
       res.write(`[END_OF_OPENAI_RESPONSE]
-${relatedDocs.map((doc) => doc.metadata?.source).join(",")}
+${relatedDocs.map((doc: any) => doc.metadata?.source).join(",")}
               `);
     }
 
@@ -177,7 +175,7 @@ ${relatedDocs.map((doc) => doc.metadata?.source).join(",")}
             messageId: `response-${new Date().getTime()}`,
             timestamp: responseTimestamp,
             content: responseContent,
-            sources: relatedDocs.map((doc) => doc.metadata?.source),
+            sources: relatedDocs.map((doc: any) => doc.metadata?.source),
             role: "response", // Set the role for the response
             likeStatus: "",
           }
@@ -185,6 +183,58 @@ ${relatedDocs.map((doc) => doc.metadata?.source).join(",")}
       };
 
       await conversationDocRef.update(conversationUpdate);
+
+      const questionTypes = ["Type1", "Type2", "Type3"]; // Replace with actual types
+      const conversationMessage = `
+  [START OF CONVERSATION]
+  QUESTION:
+    ${messages[messages.length - 1].content}
+
+
+  RESPONSE:
+    ${responseContent}
+  [END OF CONVERSATION]
+
+[START OF INSTRUCTIONS]
+  Analyze the conversation and classify.
+    
+  {
+    escalation: Determine if the conversation was escalated to a human. (true/false)
+    resolution: Assess if the query was resolved. (true/false)
+    questionType: Categorize the question based on predefined types (${questionTypes.join(
+      ", "
+    )}), or suggest a new type. (string)
+    sentimentAnalysis: Analyze the sentiment of the conversation. (positive/negative/neutral)
+    personalInformation: Detect if the conversation contains personal information about the customer. (true/false)
+  }
+  [END OF INSTRUCTIONS]
+
+  Begin!
+`;
+
+      const classification = await openai.chat.completions.create({
+        messages: [
+          {
+            role: "system",
+            content:
+              "Your task is to analyze a conversation and classify it in JSON format.",
+          },
+          { role: "user", content: conversationMessage },
+        ],
+        model: "gpt-3.5-turbo-1106",
+        response_format: { type: "json_object" },
+      });
+
+      const classificationResponse = JSON.parse(
+        classification.choices[0].message.content as string
+      );
+      console.log("classificationResponse: ", classificationResponse);
+
+      await updateConversationAndMetrics(
+        projectId,
+        conversationId,
+        classificationResponse
+      );
     } catch (error) {
       console.error("Error updating conversation document: ", error);
     }
