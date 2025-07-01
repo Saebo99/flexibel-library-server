@@ -17,9 +17,6 @@ export const componentPostChat = async (req: Request, res: Response) => {
   console.log("postChat");
   const clientKey = req.headers.authorization?.replace("Bearer ", "");
   const { messages, conversationId } = req.body; // Include conversationId in the request body
-  console.log("clientKey: ", clientKey);
-  console.log("messages: ", messages);
-  console.log("conversationId: ", conversationId);
 
   if (!clientKey) {
     res.status(401).send("Unauthorized");
@@ -27,14 +24,11 @@ export const componentPostChat = async (req: Request, res: Response) => {
   }
 
   try {
-    console.log("within try");
     const projectId = await validateClientKey(clientKey);
-    console.log("projectId: ", projectId);
 
     // Retrieve or create conversation document
     let conversationDocRef;
     if (conversationId) {
-      console.log("within if");
       // If a conversationId is provided, retrieve the existing conversation
       conversationDocRef = db.collection("conversations").doc(conversationId);
       const conversationDoc = await conversationDocRef.get();
@@ -42,7 +36,6 @@ export const componentPostChat = async (req: Request, res: Response) => {
         return res.status(404).send("Conversation not found");
       }
     } else {
-      console.log("within else");
       const newConversationId = await createConversation(projectId);
       conversationDocRef = db
         .collection("conversations")
@@ -68,14 +61,10 @@ export const componentPostChat = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Messages are required" });
     }
 
-    const { relatedDocs, similarityScore }: any = await queryDB();
+    const { relatedDocs, similarityScore }: any = await queryDB(queryParam, projectId);
 
-    console.log("relatedDocs.metadata: ", relatedDocs.metadata);
-
-    console.log("finding model");
     // Find the key that has a value equal to true within the models object
     const modelKey = Object.keys(models).find((key) => models[key] === true);
-    console.log("modelKey: ", modelKey);
 
     if (!modelKey) {
       res.status(400).send("No valid model key found");

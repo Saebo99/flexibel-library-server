@@ -66,7 +66,7 @@ export const postChat = async (req: Request, res: Response) => {
       return res.status(400).json({ error: "Messages are required" });
     }
 
-    const { relatedDocs, similarityScore } = await queryDB();
+    const { relatedDocs, similarityScore } = await queryDB(queryParam, projectId);
 
     // Find the key that has a value equal to true within the models object
     const modelKey = Object.keys(models).find((key) => models[key] === true);

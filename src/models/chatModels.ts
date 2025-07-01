@@ -1,12 +1,45 @@
 const admin = require("firebase-admin");
 import { db } from "../firebase/db";
+import { AzureAISearchVectorStore } from "@langchain/community/vectorstores/azure_aisearch";
+import { AzureOpenAIEmbeddings } from "@langchain/openai";
+import { SearchClient, AzureKeyCredential } from "@azure/search-documents";
 
-import { OpenAIEmbeddings } from "@langchain/openai";
+const embeddings = new AzureOpenAIEmbeddings({
+  azureOpenAIApiEmbeddingsDeploymentName: "text-embedding-3-small",
+  azureOpenAIApiKey: "2xTMgvtKOhkgmcDGGARcuG54fhqGIA98jhMFGvrL4caXiPRjcyJmJQQJ99BGACHYHv6XJ3w3AAAAACOGj0XC",
+  azureOpenAIApiVersion: "2024-02-01",
+  azureOpenAIBasePath: "https://patri-mckkdq7n-eastus2.cognitiveservices.azure.com/openai/deployments/text-embedding-3-small/embeddings?api-version=2023-05-15"
+});
 
-export const queryDB = async () => ({
-  relatedDocs: [],
-  similarityScore: 0
-})
+export const queryDB = async (
+  query: string,
+  projectId: string,
+  k = 3
+): Promise<{ relatedDocs: any[]; similarityScore: number }> => {
+  // 1. Build a LangChain vector-store that “wraps” the existing index
+  const vectorStore = new AzureAISearchVectorStore(embeddings, {
+    client: new SearchClient(
+      process.env.SEARCH_ENDPOINT!,
+      "flexibel-index",
+      new AzureKeyCredential(process.env.SEARCH_ADMIN_KEY!)
+    )
+  });
+
+  // 2. Similarity search with a filter so we only look inside one project
+  const results = await vectorStore.similaritySearch(
+    query,
+    k,
+  );
+
+  if (results.length === 0)
+    return { relatedDocs: [], similarityScore: 0 };
+
+  // `results` is [ Document, score ] tuples
+  const relatedDocs = results.map((result: any) => result[0]);
+  const similarityScore = (results as any)[0][1];
+
+  return { relatedDocs, similarityScore };
+};
 
 export const updateConversationAndMetrics = async (
   projectId: string,

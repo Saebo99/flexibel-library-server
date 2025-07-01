@@ -273,22 +273,30 @@ export const ingestFile = async (req: Request, res: Response) => {
 export const ingestVideo = async (req: Request, res: Response) => {
   const apiKey = req.headers.authorization?.replace("Bearer ", "");
   const { url } = req.body;
+  console.log("url: ", url)
 
   if (!apiKey) {
     res.status(401).send("Unauthorized");
     return;
   }
 
+  console.log("api key exists")
+
   try {
     // Validate API Key
     const projectId = await validateApiKey(apiKey);
+    console.log("projectId: ", projectId)
 
     const loader = YoutubeLoader.createFromUrl(url, {
       language: "en",
       addVideoInfo: true,
     });
 
+    console.log("loader created")
+
     const docs = await loader.load();
+
+    console.log("doc uno: ", docs[0])
 
     const textSplitter = new RecursiveCharacterTextSplitter({
       chunkSize: 500,
