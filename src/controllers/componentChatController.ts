@@ -204,7 +204,25 @@ ${relatedDocs.map((doc: any) => doc.metadata?.source).join(",")}
         }
       );
 
-      const classificationResponse = JSON.parse(classMsg.content as string);
+      // 🛡️  Guard against null / invalid JSON
+      let classificationResponse: any = {};
+      try {
+        if (typeof classMsg.content === "string") {
+          classificationResponse = JSON.parse(classMsg.content);
+        } else {
+          throw new Error("OpenAI returned empty content");
+        }
+      } catch (err) {
+        console.error("Classification JSON-parse failed:", err);
+        classificationResponse = {
+          escalation: false,
+          resolution: false,
+          questionType: "Unknown",
+          sentimentAnalysis: "neutral",
+          personalInformation: false,
+          similarityScore
+        };
+      }
       // Add the similarity score to the classification response
       classificationResponse.similarityScore = similarityScore;
       console.log("classificationResponse: ", classificationResponse);
